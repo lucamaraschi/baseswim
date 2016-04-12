@@ -11,6 +11,7 @@ const pino = require('pino')
 const xtend = require('xtend')
 const control = require('./lib/control')
 const udpFreePort = require('udp-free-port')
+const Rx = require('rx')
 const defaults = {
   joinTimeout: 5000,
   pingTimeout: 200, // increase the swim default 10 times
@@ -40,34 +41,37 @@ function BaseSwim (id, opts) {
   // hacky fix to have stable events
   let set = new Set()
 
-  this.on(Swim.EventType.Change, (event) => {
-    switch (event.state) {
-      case 0:
-        if (!set.has(event.host)) {
-          set.add(event.host)
-          this.emit('peerUp', event)
-        }
-        break
-    }
-  })
+  Rx.Observable.fromEvent(this, Swim.EventType.Change)
+    .subscribe((event) => {
+      switch (event.state) {
+        case 0:
+          if (!set.has(event.host)) {
+            set.add(event.host)
+            this.emit('peerUp', event)
+          }
 
-  this.on(Swim.EventType.Update, (event) => {
-    switch (event.state) {
-      case 0:
-        if (!set.has(event.host)) {
-          set.add(event.host)
-          this.emit('peerUp', event)
-        }
-        break
-      case 1:
-        this.emit('peerSuspect', event)
-        break
-      case 2:
-        set.delete(event.host)
-        this.emit('peerDown', event)
-        break
-    }
-  })
+          break
+      }
+    })
+
+  Rx.Observable.fromEvent(this, Swim.EventType.Update)
+    .subscribe((event) => {
+      switch (event.state) {
+        case 0:
+          if (!set.has(event.host)) {
+            set.add(event.host)
+            this.emit('peerUp', event)
+          }
+          break
+        case 1:
+          this.emit('peerSuspect', event)
+          break
+        case 2:
+          set.delete(event.host)
+          this.emit('peerDown', event)
+          break
+      }
+    })
 
   const boot = () => {
     Swim.call(this, opts)
@@ -156,19 +160,29 @@ function start () {
   argv.base = argv._
 
   let baseswim = new BaseSwim(argv)
-  baseswim.on('httpReady', (port) => {
-    info('http server listening on port %d', port)
+
+  Rx.Observable.fromEvent(baseswim, 'httpReady')
+  .subscribe((event) => {
+    info('http server listening on port %d', event)
   })
-  baseswim.on('peerUp', (peer) => {
+
+  Rx.Observable.fromEvent(baseswim, 'peerUp')
+  .subscribe((peer) => {
     info(peer, 'peer online')
   })
-  baseswim.on('peerSuspect', (peer) => {
+
+  Rx.Observable.fromEvent(baseswim, 'peerSuspect')
+  .subscribe((peer) => {
     info(peer, 'peer suspect')
   })
-  baseswim.on('peerDown', (peer) => {
+
+  Rx.Observable.fromEvent(baseswim, 'peerDown')
+  .subscribe((peer) => {
     info(peer, 'peer offline')
   })
-  baseswim.on('up', (peer) => {
+
+  Rx.Observable.fromEvent(baseswim, 'up')
+  .subscribe((peer) => {
     info({ id: baseswim.whoami() }, 'I am up')
   })
 }
