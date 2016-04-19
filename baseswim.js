@@ -1,13 +1,8 @@
-#! /usr/bin/env node
-
 'use strict'
 
 const networkAddress = require('network-address')
 const Swim = require('swim')
 const assert = require('assert')
-const inherits = require('util').inherits
-const minimist = require('minimist')
-const pino = require('pino')
 const xtend = require('xtend')
 const control = require('./lib/control')
 const udpFreePort = require('udp-free-port')
@@ -19,63 +14,92 @@ const defaults = {
   interval: 200 // double swim default
 }
 
-function BaseSwim (id, opts) {
-  if (!(this instanceof BaseSwim)) {
-    return new BaseSwim(id, opts)
+let _instance = null
+
+const BaseSwim = class BaseSwim extends Swim {
+  constructor (id, opts) {
+    if (typeof id === 'object') {
+      opts = id
+      id = null
+    }
+
+    opts = xtend(defaults, opts)
+
+    // cannot use xtend because it is not recursive
+    opts.local = opts.local || {}
+    opts.base = opts.base || []
+
+    // initialize the current host with the id
+    opts.local.host = opts.local.host || id
+
+    super(opts)
+    this.initialize(opts)
   }
 
-  if (typeof id === 'object') {
-    opts = id
-    id = null
+  static Baseswim (id, opts) {
+    if (!_instance) {
+      _instance = new BaseSwim(id, opts)
+    }
+    return _instance
   }
 
-  opts = xtend(defaults, opts)
+  initialize (opts) {
+    const hostname = opts.host || networkAddress()
 
-  // cannot use xtend because it is not recursive
-  opts.local = opts.local || {}
-  opts.base = opts.base || []
+    if (!opts.local.host && opts.port) {
+      opts.local.host = hostname + ':' + opts.port
+    } else if (!opts.local.host && !opts.port) {
+      udpFreePort((err, port) => {
+        if (err) {
+          this.emit('error', err)
+        }
 
-  // initialize the current host with the id
-  opts.local.host = opts.local.host || id
+        opts.local.host = hostname + ':' + port
+      })
+    }
 
-  // hacky fix to have stable events
-  let set = new Set()
+    assert(opts.local.host, 'missing id or opts.local.host or opts.port')
+    // hacky fix to have stable events
+    let set = new Set()
 
-  Rx.Observable.fromEvent(this, Swim.EventType.Change)
-    .subscribe((event) => {
-      switch (event.state) {
-        case 0:
-          if (!set.has(event.host)) {
-            set.add(event.host)
-            this.emit('peerUp', event)
-          }
+    Rx.Observable.fromEvent(this, Swim.EventType.Change)
+      .subscribe((event) => {
+        switch (event.state) {
+          case 0:
+            if (!set.has(event.host)) {
+              set.add(event.host)
+              this.emit('peerUp', event)
+            }
 
-          break
-      }
-    })
+            break
+        }
+      })
 
-  Rx.Observable.fromEvent(this, Swim.EventType.Update)
-    .subscribe((event) => {
-      switch (event.state) {
-        case 0:
-          if (!set.has(event.host)) {
-            set.add(event.host)
-            this.emit('peerUp', event)
-          }
-          break
-        case 1:
-          this.emit('peerSuspect', event)
-          break
-        case 2:
-          set.delete(event.host)
-          this.emit('peerDown', event)
-          break
-      }
-    })
+    Rx.Observable.fromEvent(this, Swim.EventType.Update)
+      .subscribe((event) => {
+        switch (event.state) {
+          case 0:
+            if (!set.has(event.host)) {
+              set.add(event.host)
+              this.emit('peerUp', event)
+            }
+            break
+          case 1:
+            this.emit('peerSuspect', event)
+            break
+          case 2:
+            set.delete(event.host)
+            this.emit('peerDown', event)
+            break
+        }
+      })
 
-  const boot = () => {
-    Swim.call(this, opts)
+    BaseSwim.EventType = Swim.EventType
 
+    this.boot(opts)
+  }
+
+  boot (opts) {
     this.bootstrap(opts.base, (err) => {
       if (err) {
         this.emit('error', err)
@@ -100,93 +124,13 @@ function BaseSwim (id, opts) {
     })
   }
 
-  const hostname = opts.host || networkAddress()
+  leave () {
+    if (this._http) {
+      this._http.close()
+    }
 
-  if (!opts.local.host && opts.port) {
-    opts.local.host = hostname + ':' + opts.port
-  } else if (!opts.local.host && !opts.port) {
-    udpFreePort((err, port) => {
-      if (err) {
-        this.emit('error', err)
-        return
-      }
-
-      opts.local.host = hostname + ':' + port
-      boot()
-    })
-
-    return
+    Swim.prototype.leave.call(this)
   }
-
-  assert(opts.local.host, 'missing id or opts.local.host or opts.port')
-
-  boot()
-}
-
-inherits(BaseSwim, Swim)
-
-BaseSwim.EventType = Swim.EventType
-
-BaseSwim.prototype.leave = function () {
-  if (this._http) {
-    this._http.close()
-  }
-  Swim.prototype.leave.call(this)
 }
 
 module.exports = BaseSwim
-
-function start () {
-  const logger = pino()
-  const info = logger.info
-  const argv = minimist(process.argv.slice(2), {
-    integer: ['port'],
-    alias: {
-      port: 'p',
-      host: 'h',
-      help: 'H',
-      joinTimeout: 'j'
-    },
-    default: {
-      port: process.env.SWIM_PORT
-    }
-  })
-
-  if (argv.help) {
-    console.error('Usage:', process.argv[1], '[--port PORT] [--host YOURIP] base1 base2')
-    process.exit(1)
-  }
-
-  argv.base = argv._
-
-  let baseswim = new BaseSwim(argv)
-
-  Rx.Observable.fromEvent(baseswim, 'httpReady')
-  .subscribe((event) => {
-    info('http server listening on port %d', event)
-  })
-
-  Rx.Observable.fromEvent(baseswim, 'peerUp')
-  .subscribe((peer) => {
-    info(peer, 'peer online')
-  })
-
-  Rx.Observable.fromEvent(baseswim, 'peerSuspect')
-  .subscribe((peer) => {
-    info(peer, 'peer suspect')
-  })
-
-  Rx.Observable.fromEvent(baseswim, 'peerDown')
-  .subscribe((peer) => {
-    info(peer, 'peer offline')
-  })
-
-  Rx.Observable.fromEvent(baseswim, 'up')
-  .subscribe((peer) => {
-    info({ id: baseswim.whoami() }, 'I am up')
-  })
-}
-
-if (require.main === module) {
-  start()
-}
